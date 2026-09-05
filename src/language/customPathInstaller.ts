@@ -13,6 +13,21 @@ import { getDotnetExecutablePath } from '../dotnet';
 
 const mkdirAsync = promisify(fs.mkdir);
 
+/**
+ * The effective `dafny.cliPath` setting, resolved to an absolute path
+ * exactly as {@link CustomPathInstaller} resolves it before deciding
+ * whether to use it. Exported so callers that need to know which binary
+ * *would* be used -- without going through the async DLL-copy machinery --
+ * can read the same value from one place, rather than re-deriving it.
+ */
+export function resolveConfiguredCliPath(context: ExtensionContext): string {
+  let cliPath = Configuration.get<string | null>(ConfigurationConstants.LanguageServer.CliPath) ?? '';
+  if(cliPath && !path.isAbsolute(cliPath)) {
+    cliPath = path.join(context.extensionPath, cliPath);
+  }
+  return cliPath;
+}
+
 export class CustomPathInstaller {
   public constructor(
     public readonly context: ExtensionContext,
@@ -57,10 +72,7 @@ export class CustomPathInstaller {
   private async getCliPathUncached(context: ExtensionContext): Promise<string> {
     let cliPathOverride = process.env['DAFNY_SERVER_OVERRIDE'] ?? '';
     const version = getPreferredVersion();
-    let cliPath = Configuration.get<string | null>(ConfigurationConstants.LanguageServer.CliPath) ?? '';
-    if(cliPath && !path.isAbsolute(cliPath)) {
-      cliPath = path.join(context.extensionPath, cliPath);
-    }
+    const cliPath = resolveConfiguredCliPath(context);
     if(cliPathOverride || cliPath && version === LanguageServerConstants.Custom) {
       const originalPath = cliPathOverride || cliPath;
       let acopyofDafny = originalPath;

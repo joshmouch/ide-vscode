@@ -1,21 +1,57 @@
-import { Disposable, Uri, Diagnostic, EventEmitter, Event } from 'vscode';
+import { Disposable, Uri, Diagnostic, EventEmitter, Event, OutputChannel } from 'vscode';
 import { HandleDiagnosticsSignature, LanguageClient, LanguageClientOptions, ServerOptions, TextDocumentPositionParams } from 'vscode-languageclient/node';
 
 import Configuration from '../configuration';
-import { ConfigurationConstants } from '../constants';
+import { ConfigurationConstants, LanguageServerConstants } from '../constants';
 import { DafnyDocumentFilter } from '../tools/vscode';
 import { ICompilationStatusParams, IVerificationCompletedParams, IVerificationStartedParams } from './api/compilationStatus';
 import { IVerificationTraceItem, IVerificationTraceParams } from './api/verificationTrace';
 import { IGhostDiagnosticsParams } from './api/ghostDiagnostics';
 import { IVerificationGutterStatusParams as IVerificationGutterStatusParams } from './api/verificationGutterStatusParams';
 import { IVerificationSymbolStatusParams } from './api/verificationSymbolStatusParams';
-import { DafnyInstaller } from './dafnyInstallation';
+import { DafnyInstaller, getPreferredVersion } from './dafnyInstallation';
+import { resolveConfiguredCliPath } from './customPathInstaller';
+import {
+  resolveToolchainSelector,
+  toolchainSelectorArgs,
+  toolchainSelectorLogLine,
+  nodeFsProbe,
+  ToolchainSelectorResolution
+} from './toolchainSelectorResolution';
 import * as os from 'os';
+
+/**
+ * What this launch's `--toolchain-selector` should be, resolved from the
+ * same signals {@link CustomPathInstaller} reads to pick a binary --
+ * `DAFNY_SERVER_OVERRIDE`, then `dafny.cliPath` (only when `dafny.version`
+ * is `"custom"`), and otherwise the extension's own GitHub-release or
+ * from-source path, which is never bound to a toolchain profile record.
+ * See F365 defect 2: this is the one place that decision is made, so every
+ * launch path is covered by the same declaration or the same explicit
+ * "cannot declare" reason -- never silently.
+ */
+function resolveLaunchToolchainSelector(installer: DafnyInstaller): ToolchainSelectorResolution {
+  return resolveToolchainSelector({
+    dafnyServerOverride: process.env['DAFNY_SERVER_OVERRIDE'],
+    cliPathSetting: resolveConfiguredCliPath(installer.context) || undefined,
+    versionSetting: getPreferredVersion(),
+    customVersionSentinel: LanguageServerConstants.Custom
+  }, nodeFsProbe);
+}
+
+/**
+ * Say what was decided, out loud, either way. A session that cannot declare
+ * its toolchain must not look identical to a declared one -- that silence
+ * was F365 defect 2's actual shape.
+ */
+function logToolchainSelectorResolution(statusOutput: OutputChannel, resolution: ToolchainSelectorResolution): void {
+  statusOutput.appendLine(toolchainSelectorLogLine(resolution));
+}
 
 const LanguageServerId = 'dafny-vscode';
 const LanguageServerName = 'Dafny Language Server';
 
-function getLanguageServerLaunchArgsNew(): string[] {
+function getLanguageServerLaunchArgsNew(toolchainSelector: ToolchainSelectorResolution): string[] {
   const oldVerifyOnValue = Configuration.get<string>(ConfigurationConstants.LanguageServer.AutomaticVerification);
   const map: Record<string, string> = {
     never: 'Never',
@@ -36,6 +72,11 @@ function getLanguageServerLaunchArgsNew(): string[] {
     `--notify-ghostness:${Configuration.get<string>(ConfigurationConstants.LanguageServer.MarkGhostStatements)}`,
     `--notify-line-verification-status:${Configuration.get<string>(ConfigurationConstants.LanguageServer.DisplayGutterStatus)}`,
     ...getDafnyPluginsArgument(),
+    // F365 defect 2: declare the toolchain profile that selected this binary when one is
+    // discoverable (--toolchain-selector <profile-record>), matching what LanguageServer.Options
+    // registers server-side. When none is discoverable this contributes nothing -- the absence is
+    // still recorded, via the log line create() writes from the same resolution, never silently.
+    ...toolchainSelectorArgs(toolchainSelector),
     ...launchArgs
   ];
 }
@@ -143,7 +184,9 @@ export class DafnyLanguageClient extends LanguageClient {
   }
 
   public static async create(installer: DafnyInstaller): Promise<DafnyLanguageClient> {
-    const exec = await installer.getCliExecutable(true, getLanguageServerLaunchArgsNew(), getLanguageServerLaunchArgsOld());
+    const toolchainSelector = resolveLaunchToolchainSelector(installer);
+    logToolchainSelectorResolution(installer.statusOutput, toolchainSelector);
+    const exec = await installer.getCliExecutable(true, getLanguageServerLaunchArgsNew(toolchainSelector), getLanguageServerLaunchArgsOld());
 
     installer.statusOutput.appendLine(`Language server: ${JSON.stringify(exec)}`);
     const serverOptions: ServerOptions = {
