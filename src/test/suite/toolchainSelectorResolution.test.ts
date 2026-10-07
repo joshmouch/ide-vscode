@@ -1,7 +1,11 @@
 import * as assert from 'assert';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
 import {
   resolveToolchainSelector,
   resolveProfileRecordForPath,
+  nodeFsProbe,
   toolchainSelectorArgs,
   toolchainSelectorLogLine,
   ToolchainSelectorFsProbe,
@@ -17,10 +21,11 @@ import {
 
 const CUSTOM = 'custom';
 
-function fakeFs(files: Record<string, string>): ToolchainSelectorFsProbe {
+function fakeFs(files: Record<string, string>, links: Record<string, string> = {}): ToolchainSelectorFsProbe {
   return {
     fileExists: p => Object.prototype.hasOwnProperty.call(files, p),
-    readFile: p => files[p]
+    readFile: p => files[p],
+    readSymbolicLink: p => links[p]
   };
 }
 
@@ -58,6 +63,31 @@ suite('toolchainSelectorResolution', () => {
         profileRecordPath: '/Users/josh/.local/lib/dafny/profiles/prod/current/profile.json',
         source: 'launcher /Users/josh/.local/bin/dafny-prod -> /Users/josh/.local/lib/dafny/profiles/prod/current/dafny'
       });
+    });
+
+    test('follows a relative symbolic-link launcher to its target sibling profile record on the real filesystem', () => {
+      const root = fs.mkdtempSync(path.join(os.tmpdir(), 'dafny-selector-'));
+      try {
+        const bin = path.join(root, 'bin');
+        const selection = path.join(root, 'profiles', 'dev', 'selections', 'v3-selection');
+        const current = path.join(root, 'profiles', 'dev', 'current');
+        fs.mkdirSync(bin, { recursive: true });
+        fs.mkdirSync(selection, { recursive: true });
+        fs.writeFileSync(path.join(selection, 'dafny'), '#!/bin/sh\n');
+        fs.writeFileSync(path.join(selection, 'profile.json'), '{"schema":"dafny-toolchain-profile/v3"}\n');
+        fs.symlinkSync(path.relative(path.dirname(current), selection), current);
+        const launcher = path.join(bin, 'dafny-dev');
+        fs.symlinkSync(path.relative(bin, path.join(current, 'dafny')), launcher);
+
+        const found = resolveProfileRecordForPath(launcher, nodeFsProbe);
+
+        assert.deepStrictEqual(found, {
+          profileRecordPath: path.join(current, 'profile.json'),
+          source: `symbolic link ${launcher} -> ${path.join(current, 'dafny')}`
+        });
+      } finally {
+        fs.rmSync(root, { recursive: true, force: true });
+      }
     });
 
     test('returns undefined when nothing is beside the path and it is not a launcher', () => {

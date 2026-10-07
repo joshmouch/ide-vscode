@@ -19,26 +19,30 @@ import * as path from 'path';
  * declaration where a profile record is actually discoverable, and makes
  * the absence explicit -- never silent -- where it is not.
  *
- * A `dafny-toolchain-profile/v2` record (see `ToolchainSelector.Read`) is a
+ * A canonical toolchain profile record (see `ToolchainSelector.Read`) is a
  * `profile.json` file that a materializer writes beside the executable it
- * produced. Two shapes are recognized here, both read-only:
+ * produced. Schema validation remains owned by that canonical reader. Two
+ * discovery shapes are recognized here, both read-only:
  *
  *  - The configured path already points *into* a profile's materialization
  *    (e.g. `~/.local/lib/dafny/profiles/prod/current/dafny`), so
  *    `profile.json` sits directly beside it.
  *  - The configured path is a launcher shim (e.g. `~/.local/bin/dafny-prod`)
- *    whose body is `exec <target> "$@"`; the profile record sits beside
- *    `<target>` instead. No profile name is ever hard-coded -- the launcher
- *    is followed wherever it points, per `ToolchainSelector.cs`'s own
- *    documentation of itself as "a transparent shim".
+ *    implemented either as a symbolic link or as a script whose body is
+ *    `exec <target> "$@"`; the profile record sits beside `<target>` instead.
+ *    No profile name is ever hard-coded -- the launcher is followed wherever
+ *    it points, per `ToolchainSelector.cs`'s own documentation of itself as
+ *    "a transparent shim".
  */
 
-/** Minimal filesystem access this module needs, so tests never touch a real disk. */
+/** Minimal filesystem access this module needs, allowing pure probes and a focused real-filesystem control. */
 export interface ToolchainSelectorFsProbe {
   /** True if a regular file exists at this path. */
   fileExists(candidatePath: string): boolean;
   /** File contents as utf8 text, or undefined if it cannot be read as text. */
   readFile(candidatePath: string): string | undefined;
+  /** The raw target of a symbolic link, or undefined when this is not a readable link. */
+  readSymbolicLink(candidatePath: string): string | undefined;
 }
 
 /** {@link ToolchainSelectorFsProbe} backed by the real filesystem. */
@@ -53,6 +57,13 @@ export const nodeFsProbe: ToolchainSelectorFsProbe = {
   readFile(candidatePath: string): string | undefined {
     try {
       return fs.readFileSync(candidatePath, 'utf8');
+    } catch(error: unknown) {
+      return undefined;
+    }
+  },
+  readSymbolicLink(candidatePath: string): string | undefined {
+    try {
+      return fs.readlinkSync(candidatePath);
     } catch(error: unknown) {
       return undefined;
     }
@@ -95,7 +106,7 @@ export function resolveToolchainSelector(
     return {
       kind: 'undeclared',
       reason: `DAFNY_SERVER_OVERRIDE=${dafnyServerOverride} names an executable with no discoverable `
-        + 'dafny-toolchain-profile/v2 record beside it or beside its launcher target'
+        + 'canonical toolchain profile record beside it or beside its launcher target'
     };
   }
 
@@ -107,7 +118,7 @@ export function resolveToolchainSelector(
     return {
       kind: 'undeclared',
       reason: `dafny.cliPath=${cliPathSetting} (dafny.version="${customVersionSentinel}") names an executable with `
-        + 'no discoverable dafny-toolchain-profile/v2 record beside it or beside its launcher target'
+        + 'no discoverable canonical toolchain profile record beside it or beside its launcher target'
     };
   }
 
@@ -133,6 +144,17 @@ export function resolveProfileRecordForPath(
     return { profileRecordPath: direct, source: `sibling of ${candidatePath}` };
   }
 
+  const symbolicLinkTarget = readSymbolicLinkTarget(candidatePath, probe);
+  if(symbolicLinkTarget !== undefined) {
+    const viaSymbolicLink = siblingProfileRecord(symbolicLinkTarget, probe);
+    if(viaSymbolicLink !== undefined) {
+      return {
+        profileRecordPath: viaSymbolicLink,
+        source: `symbolic link ${candidatePath} -> ${symbolicLinkTarget}`
+      };
+    }
+  }
+
   const launcherTarget = readLauncherExecTarget(candidatePath, probe);
   if(launcherTarget !== undefined) {
     const viaLauncher = siblingProfileRecord(launcherTarget, probe);
@@ -142,6 +164,14 @@ export function resolveProfileRecordForPath(
   }
 
   return undefined;
+}
+
+function readSymbolicLinkTarget(linkPath: string, probe: ToolchainSelectorFsProbe): string | undefined {
+  const target = probe.readSymbolicLink(linkPath);
+  if(target === undefined) {
+    return undefined;
+  }
+  return path.resolve(path.dirname(linkPath), target);
 }
 
 /**
